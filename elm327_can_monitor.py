@@ -832,7 +832,7 @@ def run() -> int:
         ),
         default="wifi",
         help=(
-            "Transport (default: wifi; wifi/tcp = TCP/IP, serial = COM/Bluetooth SPP, "
+            "Transport (default: wifi; wifi/tcp = TCP/IP, serial = ELM327 over COM/Bluetooth SPP, "
             "arduino or alexandreblin/arduino-peugeot-can = Arduino sketch stream, "
             "pycan = python-can bus, candump/pcap = file replay)"
         ),

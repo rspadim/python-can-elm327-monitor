@@ -34,8 +34,8 @@ py elm327_can_monitor.py
 ## Transport Modes
 - Default: `--transport wifi` (TCP/IP)
 - `--transport tcp` is an alias of `wifi`
-- `--transport serial` uses Bluetooth SPP / COM port
-- `--transport arduino` reads `FRAME:ID=...` serial stream (Arduino sketch - Alexandre Blin)
+- `--transport serial` uses **ELM327 over serial** (typically Bluetooth SPP exposed as a COM port)
+- `--transport arduino` reads `FRAME:ID=...` serial stream ([Arduino sketch - Alexandre Blin](https://github.com/alexandreblin/arduino-peugeot-can))
 - `--transport alexandreblin/arduino-peugeot-can` is an alias of `arduino`
 - `--transport pycan` uses native python-can bus APIs
 - `--transport candump` replays candump log files
