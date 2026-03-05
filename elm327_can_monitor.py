@@ -7,9 +7,12 @@ Shows the last frame per CAN ID, sorted by ID.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+from binascii import unhexlify
 import math
 import os
 from pathlib import Path
+from queue import Queue
 import re
 import signal
 import socket
@@ -28,6 +31,15 @@ try:
     import can  # type: ignore
 except ImportError:
     can = None  # type: ignore[assignment]
+
+try:
+    from scapy.all import IP, IPv6, PcapReader, Raw, TCP  # type: ignore
+except ImportError:
+    IP = None  # type: ignore[assignment]
+    IPv6 = None  # type: ignore[assignment]
+    PcapReader = None  # type: ignore[assignment]
+    Raw = None  # type: ignore[assignment]
+    TCP = None  # type: ignore[assignment]
 
 try:
     from rich.columns import Columns
@@ -50,6 +62,7 @@ IGNORE_PREFIXES = (
     "UNABLE TO CONNECT",
 )
 HEX_TOKEN_RE = re.compile(r"^[0-9A-Fa-f]{1,8}$")
+CANDUMP_RE = re.compile(r"\(([.0-9]+)\)\s+\S+\s+([0-9A-Fa-f]+)#([0-9A-Fa-f]*)")
 
 
 class InvalidFrame(Exception):
@@ -348,6 +361,254 @@ class PyCanHandler:
         return int(msg.arbitration_id), bytes(msg.data)
 
 
+class ArduinoSketchSerialHandler:
+    """Reads FRAME:ID=..:LEN=..:.. lines produced by the Alexandre Blin Arduino sketch."""
+
+    def __init__(self, port_name: str, baudrate: int = 115200, timeout: float = 1.0):
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.serial_dev = None
+
+    def open(self) -> None:
+        if serial is None:
+            raise RuntimeError("pyserial is required for --transport arduino (install: py -m pip install pyserial)")
+        self.serial_dev = serial.Serial(
+            self.port_name,
+            self.baudrate,
+            timeout=self.timeout,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+        )
+
+    def close(self) -> None:
+        if self.serial_dev:
+            try:
+                self.serial_dev.close()
+            finally:
+                self.serial_dev = None
+
+    def get_message(self) -> tuple[int, bytes]:
+        if not self.serial_dev:
+            raise OSError("Serial port is not connected")
+        line = self._read_until_newline()
+        return self._parse(line)
+
+    def _read_until_newline(self) -> bytes:
+        line = self.serial_dev.readline()
+        if line == b"":
+            raise InvalidFrame("timeout")
+        while not line.endswith(b"\n"):
+            chunk = self.serial_dev.readline()
+            if chunk == b"":
+                raise InvalidFrame("timeout")
+            line += chunk
+        return line.strip()
+
+    @staticmethod
+    def _parse(line: bytes) -> tuple[int, bytes]:
+        frame = line.split(b":", maxsplit=3)
+        try:
+            frame_id = int(frame[1][3:])
+            frame_length = int(frame[2][4:])
+            hex_data = frame[3].replace(b":", b"")
+            data = unhexlify(hex_data)
+        except (IndexError, ValueError) as exc:
+            raise InvalidFrame(f"invalid Arduino frame: {line!r}") from exc
+        if len(data) != frame_length:
+            raise InvalidFrame(f"wrong frame length: {line!r}")
+        return frame_id, data
+
+
+class CandumpFileHandler:
+    def __init__(
+        self,
+        file_path: str,
+        speed_scale: float = 0.0,
+        follow: bool = False,
+        poll_interval: float = 0.2,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ):
+        self.file_path = file_path
+        self.speed_scale = speed_scale
+        self.follow = follow
+        self.poll_interval = poll_interval
+        self.start_ts = start_ts
+        self.end_ts = end_ts
+        self.file_obj = None
+        self.prev_ts: float | None = None
+
+    def open(self) -> None:
+        self.file_obj = open(self.file_path, "rt", encoding="utf-8")
+
+    def close(self) -> None:
+        if self.file_obj:
+            self.file_obj.close()
+            self.file_obj = None
+
+    def get_message(self) -> tuple[int, bytes]:
+        if not self.file_obj:
+            raise OSError("candump file is not open")
+
+        while True:
+            line = self.file_obj.readline()
+            if line == "":
+                if self.follow:
+                    time.sleep(self.poll_interval)
+                    continue
+                raise EOFError("end of candump file")
+            msg = CANDUMP_RE.match(line.strip())
+            if not msg:
+                continue
+
+            ts = float(msg.group(1))
+            if self.start_ts is not None and ts < self.start_ts:
+                continue
+            if self.end_ts is not None and ts > self.end_ts:
+                raise EOFError("end datetime reached")
+            can_id = int(msg.group(2), 16)
+            data_hex = msg.group(3)
+            try:
+                data = bytes.fromhex(data_hex)
+            except ValueError as exc:
+                raise InvalidFrame(f"invalid candump payload: {line.strip()}") from exc
+
+            if self.speed_scale > 0 and self.prev_ts is not None:
+                delay = (ts - self.prev_ts) / self.speed_scale
+                if delay > 0:
+                    time.sleep(delay)
+            self.prev_ts = ts
+
+            return can_id, data
+
+
+class PcapFileHandler:
+    def __init__(
+        self,
+        file_path: str,
+        can_id_bits: str,
+        host: str = "",
+        port: int = 0,
+        follow: bool = False,
+        poll_interval: float = 0.5,
+        speed_scale: float = 0.0,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ):
+        self.file_path = file_path
+        self.can_id_bits = can_id_bits
+        self.host = host
+        self.port = port
+        self.follow = follow
+        self.poll_interval = poll_interval
+        self.speed_scale = speed_scale
+        self.start_ts = start_ts
+        self.end_ts = end_ts
+        self.reader = None
+        self.line_queue: Queue[str] = Queue()
+        self.buffer = ""
+        self.packets_seen = 0
+        self.prev_pkt_ts: float | None = None
+
+    def open(self) -> None:
+        if PcapReader is None or TCP is None or Raw is None:
+            raise RuntimeError("scapy is required for --transport pcap (install: py -m pip install scapy)")
+        self.reader = PcapReader(self.file_path)
+
+    def close(self) -> None:
+        if self.reader:
+            self.reader.close()
+            self.reader = None
+
+    def get_message(self) -> tuple[int, bytes]:
+        while True:
+            while not self.line_queue.empty():
+                line = self.line_queue.get_nowait().strip()
+                if not line:
+                    continue
+                return ELM327HandlerBase._parse_monitor_line(line, self.can_id_bits)
+            self._load_next_packet_lines()
+
+    def _matches_filter(self, packet) -> bool:
+        if TCP not in packet:
+            return False
+
+        if self.port and packet[TCP].sport != self.port and packet[TCP].dport != self.port:
+            return False
+
+        if not self.host:
+            return True
+
+        if IP is not None and IP in packet:
+            return packet[IP].src == self.host or packet[IP].dst == self.host
+        if IPv6 is not None and IPv6 in packet:
+            return packet[IPv6].src == self.host or packet[IPv6].dst == self.host
+        return False
+
+    def _load_next_packet_lines(self) -> None:
+        if not self.reader:
+            raise OSError("pcap file is not open")
+
+        while True:
+            try:
+                packet = self.reader.read_packet()
+            except EOFError:
+                packet = None
+            if packet is None:
+                if self.follow:
+                    time.sleep(self.poll_interval)
+                    self._reopen_and_seek()
+                    continue
+                raise EOFError("end of pcap file")
+            self.packets_seen += 1
+            pkt_ts = float(packet.time)
+            if self.speed_scale > 0 and self.prev_pkt_ts is not None:
+                delay = (pkt_ts - self.prev_pkt_ts) / self.speed_scale
+                if delay > 0:
+                    time.sleep(delay)
+            self.prev_pkt_ts = pkt_ts
+            if self.start_ts is not None and pkt_ts < self.start_ts:
+                continue
+            if self.end_ts is not None and pkt_ts > self.end_ts:
+                raise EOFError("end datetime reached")
+            if not self._matches_filter(packet):
+                continue
+            if Raw not in packet:
+                continue
+
+            payload = bytes(packet[Raw].load).decode("ascii", errors="ignore")
+            if not payload:
+                continue
+            self.buffer += payload
+            if "\r" not in self.buffer:
+                continue
+
+            parts = self.buffer.split("\r")
+            self.buffer = parts[-1]
+            for part in parts[:-1]:
+                clean = part.strip().replace(">", "")
+                if clean:
+                    self.line_queue.put(clean)
+            if not self.line_queue.empty():
+                return
+
+    def _reopen_and_seek(self) -> None:
+        if self.reader:
+            self.reader.close()
+        self.reader = PcapReader(self.file_path)
+        skipped = 0
+        while skipped < self.packets_seen:
+            try:
+                pkt = self.reader.read_packet()
+            except EOFError:
+                pkt = None
+            if pkt is None:
+                break
+            skipped += 1
+
+
 class KeyReader:
     def __init__(self):
         self._is_windows = os.name == "nt"
@@ -401,6 +662,30 @@ def format_candump_line(ts: float, iface: str, frame_id: int, data: bytes) -> st
 
 def default_log_filename() -> str:
     return time.strftime("can.%Y%m%d-%H%M%S.log")
+
+
+def default_candump_input_file() -> str:
+    candidates = sorted(Path(".").glob("can.*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        return str(candidates[0])
+    return "can.log"
+
+
+def parse_datetime_to_epoch(value: str | None) -> float | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid datetime '{value}'. Use ISO format like 2026-03-05T10:30:00"
+        ) from exc
+    return dt.timestamp()
 
 
 def build_view(
@@ -535,9 +820,22 @@ def run() -> int:
     parser = argparse.ArgumentParser(description="CAN monitor using ELM327 (wifi/serial) or python-can")
     parser.add_argument(
         "--transport",
-        choices=("wifi", "tcp", "serial", "pycan"),
+        choices=(
+            "wifi",
+            "tcp",
+            "serial",
+            "arduino",
+            "alexandreblin/arduino-peugeot-can",
+            "pycan",
+            "candump",
+            "pcap",
+        ),
         default="wifi",
-        help="Transport (default: wifi; wifi/tcp = TCP/IP, serial = COM/Bluetooth SPP, pycan = python-can bus)",
+        help=(
+            "Transport (default: wifi; wifi/tcp = TCP/IP, serial = COM/Bluetooth SPP, "
+            "arduino or alexandreblin/arduino-peugeot-can = Arduino sketch stream, "
+            "pycan = python-can bus, candump/pcap = file replay)"
+        ),
     )
     parser.add_argument("--host", default="192.168.0.10", help="ELM327 Wi-Fi host")
     parser.add_argument("--port", type=int, default=35000, help="ELM327 Wi-Fi port")
@@ -546,7 +844,27 @@ def run() -> int:
     parser.add_argument("--pycan-interface", default="socketcan", help="python-can interface (e.g. socketcan, pcan)")
     parser.add_argument("--pycan-channel", default="can0", help="python-can channel (e.g. can0, PCAN_USBBUS1)")
     parser.add_argument("--pycan-bitrate", type=int, default=0, help="python-can bitrate (0 = do not force)")
+    parser.add_argument(
+        "--candump-file",
+        default="",
+        help="candump log file path for --transport candump (default: latest can.*.log, else can.log)",
+    )
+    parser.add_argument("--candump-speed", type=float, default=0.0, help="candump replay speed scale (0 = as fast as possible)")
+    parser.add_argument("--pcap-file", default="", help="pcap/pcapng file path for --transport pcap")
+    parser.add_argument("--pcap-host", default="192.168.0.10", help="pcap TCP filter host (default: 192.168.0.10)")
+    parser.add_argument("--pcap-port", type=int, default=35000, help="pcap TCP filter port (default: 35000)")
+    parser.add_argument("--pcap-speed", type=float, default=0.0, help="pcap replay speed scale (0 = as fast as possible)")
+    parser.add_argument("--no-follow", action="store_true", help="Disable follow mode for candump/pcap")
+    parser.add_argument(
+        "--follow-interval",
+        type=float,
+        default=0.01,
+        help="Polling interval for follow mode in seconds (default: 0.01 = 100Hz)",
+    )
+    parser.add_argument("--start-dt", default="", help="Replay start datetime (ISO, file transports only)")
+    parser.add_argument("--end-dt", default="", help="Replay end datetime (ISO, file transports only)")
     parser.add_argument("--io-timeout", type=float, default=1.0, help="Transport I/O timeout in seconds")
+    parser.add_argument("--no-clear", action="store_true", help="Disable screen clear on start/resize")
     parser.add_argument("--refresh", type=float, default=0.25, help="Screen refresh interval (seconds)")
     parser.add_argument("--blacklist", "-b", nargs="*", default=[], help="IDs to ignore (e.g. 0x7E8 123)")
     parser.add_argument(
@@ -570,18 +888,41 @@ def run() -> int:
     parser.add_argument("--no-log", action="store_true", help="Disable candump file logging")
     parser.add_argument("--iface", default="can0", help="Interface name used in candump log (default: can0)")
     args = parser.parse_args()
-    transport = "wifi" if args.transport == "tcp" else args.transport
+    args.follow = not args.no_follow
+    clear_screen = not args.no_clear
+    transport_aliases = {
+        "tcp": "wifi",
+        "alexandreblin/arduino-peugeot-can": "arduino",
+    }
+    transport = transport_aliases.get(args.transport, args.transport)
 
     if serial is None:
         print("Warning: pyserial is not installed. Serial transport will be unavailable.")
     if can is None:
         print("Warning: python-can is not installed. pycan transport will be unavailable.")
+    if PcapReader is None:
+        print("Warning: scapy is not installed. pcap transport will be unavailable.")
 
     if transport == "serial" and serial is None:
         print("Error: --transport serial requires pyserial. Install with: py -m pip install pyserial")
         return 1
+    if transport == "arduino" and serial is None:
+        print("Error: --transport arduino requires pyserial. Install with: py -m pip install pyserial")
+        return 1
     if transport == "pycan" and can is None:
         print("Error: --transport pycan requires python-can. Install with: py -m pip install python-can")
+        return 1
+    if transport == "pcap" and PcapReader is None:
+        print("Error: --transport pcap requires scapy. Install with: py -m pip install scapy")
+        return 1
+    try:
+        start_ts = parse_datetime_to_epoch(args.start_dt)
+        end_ts = parse_datetime_to_epoch(args.end_dt)
+    except argparse.ArgumentTypeError as exc:
+        print(f"Error: {exc}")
+        return 1
+    if start_ts is not None and end_ts is not None and end_ts < start_ts:
+        print("Error: --end-dt must be greater than or equal to --start-dt")
         return 1
 
     stop_event = threading.Event()
@@ -595,6 +936,11 @@ def run() -> int:
     protocol_code = resolve_protocol_code(args.can_speed, args.can_id_format)
     if transport == "serial" and not args.serial_port:
         parser.error("--serial-port is required when --transport serial")
+    if transport == "arduino" and not args.serial_port:
+        parser.error("--serial-port is required when --transport arduino")
+    candump_file = args.candump_file or default_candump_input_file()
+    if transport == "pcap" and not args.pcap_file:
+        parser.error("--pcap-file is required when --transport pcap")
 
     if transport == "serial":
         handler = ELM327SerialHandler(
@@ -604,12 +950,39 @@ def run() -> int:
             can_id_bits=args.can_id_format,
             timeout=args.io_timeout,
         )
+    elif transport == "arduino":
+        handler = ArduinoSketchSerialHandler(
+            port_name=args.serial_port,
+            baudrate=115200,
+            timeout=args.io_timeout,
+        )
     elif transport == "pycan":
         handler = PyCanHandler(
             interface=args.pycan_interface,
             channel=args.pycan_channel,
             bitrate=args.pycan_bitrate if args.pycan_bitrate > 0 else None,
             timeout=args.io_timeout,
+        )
+    elif transport == "candump":
+        handler = CandumpFileHandler(
+            file_path=candump_file,
+            speed_scale=args.candump_speed,
+            follow=args.follow,
+            poll_interval=max(0.001, args.follow_interval),
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+    elif transport == "pcap":
+        handler = PcapFileHandler(
+            file_path=args.pcap_file,
+            can_id_bits=args.can_id_format,
+            host=args.pcap_host,
+            port=args.pcap_port,
+            follow=args.follow,
+            poll_interval=max(0.001, args.follow_interval),
+            speed_scale=args.pcap_speed,
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
     else:
         handler = ELM327WiFiHandler(
@@ -619,6 +992,7 @@ def run() -> int:
             can_id_bits=args.can_id_format,
             timeout=args.io_timeout,
         )
+    reconnectable = transport in ("wifi", "serial", "arduino", "pycan")
     key_reader = KeyReader()
     log_file = None
 
@@ -634,34 +1008,76 @@ def run() -> int:
                     connected = bool(connection_state["connected"])
 
                 if not connected:
-                    try:
-                        handler.close()
-                    except OSError:
-                        pass
+                    if reconnectable:
+                        try:
+                            handler.close()
+                        except OSError:
+                            pass
                     try:
                         handler.open()
                         with state_lock:
                             connection_state["connected"] = True
                             connection_state["last_error"] = ""
                     except BaseException as exc:
+                        if reconnectable:
+                            with state_lock:
+                                connection_state["connected"] = False
+                                connection_state["reconnects"] = int(connection_state["reconnects"]) + 1
+                                connection_state["last_error"] = str(exc)
+                            time.sleep(max(0.2, args.reconnect_delay))
+                            continue
+                        with state_lock:
+                            connection_state["connected"] = False
+                            connection_state["last_error"] = str(exc)
+                        error_holder.append(exc)
+                        stop_event.set()
+                        break
+
+                try:
+                    frame_id, data = handler.get_message()
+                except InvalidFrame:
+                    continue
+                except ValueError as exc:
+                    # Some backends (e.g. pcap reader) can throw ValueError during shutdown races.
+                    if stop_event.is_set():
+                        break
+                    with state_lock:
+                        connection_state["connected"] = False
+                        connection_state["last_error"] = str(exc)
+                    if reconnectable:
+                        with state_lock:
+                            connection_state["reconnects"] = int(connection_state["reconnects"]) + 1
+                        time.sleep(max(0.2, args.reconnect_delay))
+                        continue
+                    error_holder.append(exc)
+                    stop_event.set()
+                    break
+                except EOFError as exc:
+                    if reconnectable:
                         with state_lock:
                             connection_state["connected"] = False
                             connection_state["reconnects"] = int(connection_state["reconnects"]) + 1
                             connection_state["last_error"] = str(exc)
                         time.sleep(max(0.2, args.reconnect_delay))
                         continue
-
-                try:
-                    frame_id, data = handler.get_message()
-                except InvalidFrame:
-                    continue
-                except (EOFError, OSError, RuntimeError) as exc:
+                    with state_lock:
+                        connection_state["connected"] = False
+                        connection_state["last_error"] = str(exc)
+                    # For file transports, EOF is a normal end when not following.
+                    if args.follow:
+                        error_holder.append(exc)
+                    stop_event.set()
+                    break
+                except (OSError, RuntimeError) as exc:
                     with state_lock:
                         connection_state["connected"] = False
                         connection_state["reconnects"] = int(connection_state["reconnects"]) + 1
                         connection_state["last_error"] = str(exc)
-                    time.sleep(max(0.2, args.reconnect_delay))
-                    continue
+                    if reconnectable:
+                        time.sleep(max(0.2, args.reconnect_delay))
+                        continue
+                    stop_event.set()
+                    break
 
                 if frame_id in blacklist:
                     continue
@@ -691,7 +1107,8 @@ def run() -> int:
 
     started_at = time.time()
     try:
-        os.system("cls" if os.name == "nt" else "clear")
+        if clear_screen:
+            os.system("cls" if os.name == "nt" else "clear")
         last_size = None
         with Live(auto_refresh=False, screen=False) as live:
             while not stop_event.is_set():
@@ -703,7 +1120,7 @@ def run() -> int:
                     last_error = str(connection_state["last_error"])
                 term_size = live.console.size
                 size_now = (term_size.width, term_size.height)
-                if size_now != last_size:
+                if clear_screen and size_now != last_size:
                     live.console.clear()
                     last_size = size_now
 
@@ -733,17 +1150,29 @@ def run() -> int:
                 time.sleep(max(0.05, args.refresh))
     finally:
         stop_event.set()
+        # Try to let the read loop exit cleanly before force-closing resources.
+        thread.join(timeout=1.0)
         handler.close()
         thread.join(timeout=1.5)
         if log_file:
             log_file.close()
 
     if error_holder:
-        print(f"Error: {error_holder[0]}")
+        err = error_holder[0]
+        print(f"Error: {type(err).__name__}: {err!r}")
         return 1
 
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    try:
+        raise SystemExit(run())
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+
+        print("Fatal error (unhandled exception):")
+        traceback.print_exc()
+        raise SystemExit(1)

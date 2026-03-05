@@ -12,6 +12,7 @@ https://github.com/alexandreblin/python-can-monitor
 - Optional:
   - `pyserial` for `--transport serial`
   - `python-can` for `--transport pycan`
+  - `scapy` for `--transport pcap`
 
 Install dependencies:
 
@@ -19,6 +20,7 @@ Install dependencies:
 py -m pip install rich
 py -m pip install pyserial
 py -m pip install python-can
+py -m pip install scapy
 ```
 
 ## Quick Start
@@ -32,7 +34,11 @@ py elm327_can_monitor.py
 - Default: `--transport wifi` (TCP/IP)
 - `--transport tcp` is an alias of `wifi`
 - `--transport serial` uses Bluetooth SPP / COM port
+- `--transport arduino` reads `FRAME:ID=...` serial stream (Arduino sketch - Alexandre Blin)
+- `--transport alexandreblin/arduino-peugeot-can` is an alias of `arduino`
 - `--transport pycan` uses native python-can bus APIs
+- `--transport candump` replays candump log files
+- `--transport pcap` replays ELM327 TCP payloads from pcap/pcapng
 
 Wi-Fi / TCP:
 
@@ -47,10 +53,50 @@ Serial (Bluetooth ELM327 on COM):
 py elm327_can_monitor.py --transport serial --serial-port COM5 --serial-baud 38400
 ```
 
+Arduino sketch stream (Alexandre Blin):
+
+```powershell
+py elm327_can_monitor.py --transport arduino --serial-port COM5
+py elm327_can_monitor.py --transport "alexandreblin/arduino-peugeot-can" --serial-port COM5
+```
+
+Default serial settings for this mode: `115200`, `8N1`.
+Reference: https://github.com/alexandreblin/arduino-peugeot-can
+
 python-can:
 
 ```powershell
 py elm327_can_monitor.py --transport pycan --pycan-interface socketcan --pycan-channel can0
+```
+
+candump file replay:
+
+```powershell
+py elm327_can_monitor.py --transport candump --candump-file .\can.20260305-101436.log
+```
+
+Follow a growing candump file (tail mode):
+
+```powershell
+py elm327_can_monitor.py --transport candump --candump-file .\can_live.log --follow
+```
+
+pcap/pcapng replay (TCP filter defaults to `192.168.0.10:35000`):
+
+```powershell
+py elm327_can_monitor.py --transport pcap --pcap-file .\captures\emu_35000_multi.pcapng
+```
+
+pcap replay in real-time (respect packet timestamps):
+
+```powershell
+py elm327_can_monitor.py --transport pcap --pcap-file .\captures\emu_35000_multi.pcapng --pcap-speed 1.0
+```
+
+Follow a growing pcap/pcapng file:
+
+```powershell
+py elm327_can_monitor.py --transport pcap --pcap-file .\captures\emu_live.pcapng --follow
 ```
 
 ## CAN Speed / ID Format
@@ -94,11 +140,18 @@ py elm327_can_monitor.py --no-log
 ## Useful Options
 - `--refresh 0.25` screen refresh interval in seconds
 - `-b 0x7E8 123` ignore specific IDs (hex or decimal)
-- `--transport wifi|tcp|serial|pycan`
+- `--transport wifi|tcp|serial|arduino|alexandreblin/arduino-peugeot-can|pycan|candump|pcap`
 - `--host 192.168.0.10 --port 35000` Wi-Fi/TCP endpoint
 - `--serial-port COM5 --serial-baud 38400` serial endpoint
 - `--pycan-interface socketcan --pycan-channel can0` python-can endpoint
 - `--pycan-bitrate 125000` optional python-can bitrate override
+- `--candump-file path.log` candump source file for replay
+- `--candump-speed 1.0` replay time scale (`0` = as fast as possible)
+- `--pcap-file path.pcapng` pcap source file for replay
+- `--pcap-host 192.168.0.10 --pcap-port 35000` TCP filter for pcap parsing
+- `--pcap-speed 1.0` pcap replay speed scale (`0` = as fast as possible)
+- `--follow` keep reading as file grows
+- `--follow-interval 0.2` polling interval in seconds for `--follow`
 - `--can-speed 125|250|500|auto`
 - `--can-id-format 11|29`
 - `--reconnect-delay 1.0` seconds between reconnect attempts
