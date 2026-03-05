@@ -727,6 +727,16 @@ def build_view(
     show_count = per_col_width >= 36
     rows_per_col = rows_capacity
 
+    if per_col_width >= 50:
+        bytes_w = 23
+        txt_w = 10
+    elif per_col_width >= 44:
+        bytes_w = 20
+        txt_w = 8
+    else:
+        bytes_w = 17
+        txt_w = 6
+
     now = time.time()
     lines = []
     for frame_id in ids_sorted:
@@ -734,17 +744,17 @@ def build_view(
         msg_hex = format_hex(info.data)
         msg_ascii = format_ascii(info.data)
         age = now - info.last_seen
-        base = f"{frame_id:>4d} {frame_id:>3X} {msg_hex:<17.17} {msg_ascii:<6.6}"
+        base = f"{frame_id:>4d} {frame_id:>3X} {msg_hex:<{bytes_w}.{bytes_w}} {msg_ascii:<{txt_w}.{txt_w}}"
         if show_count:
-            base += f" {info.count:>4d}"
+            base += f" {info.count:>6d}"
         if show_age:
-            base += f" {age:>4.1f}"
+            base += f" {age:>6.1f}"
         lines.append(base)
-    header = "IDd IDh Bytes             Txt"
+    header = f"{'IDd':>4} {'IDh':>3} {'Bytes':<{bytes_w}} {'Txt':<{txt_w}}"
     if show_count:
-        header += "  Cnt"
+        header += f" {'Cnt':>6}"
     if show_age:
-        header += "  Age"
+        header += f" {'Age':>6}"
 
     blocks = []
     for i in range(cols_used):
