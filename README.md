@@ -11,6 +11,7 @@ https://github.com/alexandreblin/python-can-monitor
 - `rich` (TUI)
 - Optional:
   - `pyserial` for `--transport serial`
+  - `pyserial` for `--transport arduino` / `--transport alexandreblin/arduino-peugeot-can`
   - `python-can` for `--transport pycan`
   - `scapy` for `--transport pcap`
 
@@ -39,6 +40,38 @@ py elm327_can_monitor.py
 - `--transport pycan` uses native python-can bus APIs
 - `--transport candump` replays candump log files
 - `--transport pcap` replays ELM327 TCP payloads from pcap/pcapng
+
+## Transport Overview
+- `wifi` / `tcp`:
+  - Source: ELM327 over TCP/IP (`--host`, `--port`)
+  - Best for: Wi-Fi ELM327 adapters
+  - Notes: sends ELM init commands (`ATZ`, `ATE0`, `ATL0`, `ATS0`, `ATH1`, `ATSPx`, `ATMA`)
+
+- `serial`:
+  - Source: ELM327 over serial COM/Bluetooth SPP (`--serial-port`, optional `--serial-baud`)
+  - Best for: Bluetooth ELM327 adapters exposed as COM ports
+  - Notes: same ELM init behavior as Wi-Fi mode
+
+- `arduino` / `alexandreblin/arduino-peugeot-can`:
+  - Source: serial text lines in this format:
+    - `FRAME:ID=<decimal>:LEN=<n>:<hex bytes...>`
+  - Best for: Arduino CAN reader sketch streams
+  - Notes: defaults to `115200 8N1` internally
+
+- `pycan`:
+  - Source: native CAN interface via `python-can` (`--pycan-interface`, `--pycan-channel`)
+  - Best for: direct CAN adapters supported by python-can (socketcan, pcan, etc.)
+  - Notes: no ELM parsing/AT commands; reads raw CAN frames from the bus
+
+- `candump`:
+  - Source: candump log file (`--candump-file`)
+  - Best for: offline replay/debug from saved logs
+  - Notes: supports replay speed scaling (`--candump-speed`) and time window (`--start-dt`, `--end-dt`)
+
+- `pcap`:
+  - Source: TCP payloads extracted from pcap/pcapng (`--pcap-file`)
+  - Best for: replay from captured ELM327 network traffic
+  - Notes: filters TCP stream by `--pcap-host`/`--pcap-port` (defaults `192.168.0.10:35000`), supports `--pcap-speed`, `--start-dt`, `--end-dt`
 
 Wi-Fi / TCP:
 
