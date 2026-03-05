@@ -858,8 +858,8 @@ def run() -> int:
     parser.add_argument(
         "--follow-interval",
         type=float,
-        default=0.01,
-        help="Polling interval for follow mode in seconds (default: 0.01 = 100Hz)",
+        default=0.0,
+        help="Polling interval for follow mode in seconds (default: 0)",
     )
     parser.add_argument("--start-dt", default="", help="Replay start datetime (ISO, file transports only)")
     parser.add_argument("--end-dt", default="", help="Replay end datetime (ISO, file transports only)")
@@ -968,7 +968,7 @@ def run() -> int:
             file_path=candump_file,
             speed_scale=args.candump_speed,
             follow=args.follow,
-            poll_interval=max(0.001, args.follow_interval),
+            poll_interval=max(0.0, args.follow_interval),
             start_ts=start_ts,
             end_ts=end_ts,
         )
@@ -979,7 +979,7 @@ def run() -> int:
             host=args.pcap_host,
             port=args.pcap_port,
             follow=args.follow,
-            poll_interval=max(0.001, args.follow_interval),
+            poll_interval=max(0.0, args.follow_interval),
             speed_scale=args.pcap_speed,
             start_ts=start_ts,
             end_ts=end_ts,

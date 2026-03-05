@@ -33,7 +33,7 @@ py elm327_can_monitor.py
 
 ## Transport Modes
 - Default: `--transport wifi` (TCP/IP)
-- `--transport tcp` is an alias of `wifi`
+- `--transport tcp` is an alias of `wifi` (ELM327 over TCP/IP)
 - `--transport serial` uses **ELM327 over serial** (typically Bluetooth SPP exposed as a COM port)
 - `--transport arduino` reads `FRAME:ID=...` serial stream ([Arduino sketch - Alexandre Blin](https://github.com/alexandreblin/arduino-peugeot-can))
 - `--transport alexandreblin/arduino-peugeot-can` is an alias of `arduino`
@@ -53,6 +53,7 @@ py elm327_can_monitor.py
   - Notes: same ELM init behavior as Wi-Fi mode
 
 - `arduino` / `alexandreblin/arduino-peugeot-can`:
+  - Reference: https://github.com/alexandreblin/arduino-peugeot-can
   - Source: serial text lines in this format:
     - `FRAME:ID=<decimal>:LEN=<n>:<hex bytes...>`
   - Best for: Arduino CAN reader sketch streams
@@ -100,7 +101,10 @@ python-can:
 
 ```powershell
 py elm327_can_monitor.py --transport pycan --pycan-interface socketcan --pycan-channel can0
+py elm327_can_monitor.py --transport pycan --pycan-interface socketcan --pycan-channel can0 --pycan-bitrate 125000
 ```
+
+If `--pycan-bitrate` is omitted (or `0`), bitrate is not forced by this tool.
 
 candump file replay:
 
@@ -108,10 +112,11 @@ candump file replay:
 py elm327_can_monitor.py --transport candump --candump-file .\can.20260305-101436.log
 ```
 
-Follow a growing candump file (tail mode):
+Candump follows file growth by default (tail mode).
+To stop at end-of-file instead, use:
 
 ```powershell
-py elm327_can_monitor.py --transport candump --candump-file .\can_live.log --follow
+py elm327_can_monitor.py --transport candump --candump-file .\can_live.log --no-follow
 ```
 
 pcap/pcapng replay (TCP filter defaults to `192.168.0.10:35000`):
@@ -129,7 +134,7 @@ py elm327_can_monitor.py --transport pcap --pcap-file .\captures\emu_35000_multi
 Follow a growing pcap/pcapng file:
 
 ```powershell
-py elm327_can_monitor.py --transport pcap --pcap-file .\captures\emu_live.pcapng --follow
+py elm327_can_monitor.py --transport pcap --pcap-file .\captures\emu_live.pcapng
 ```
 
 ## CAN Speed / ID Format
@@ -183,8 +188,9 @@ py elm327_can_monitor.py --no-log
 - `--pcap-file path.pcapng` pcap source file for replay
 - `--pcap-host 192.168.0.10 --pcap-port 35000` TCP filter for pcap parsing
 - `--pcap-speed 1.0` pcap replay speed scale (`0` = as fast as possible)
-- `--follow` keep reading as file grows
-- `--follow-interval 0.2` polling interval in seconds for `--follow`
+- follow mode is enabled by default for `candump` and `pcap`
+- `--no-follow` stop when end-of-file is reached
+- `--follow-interval 0` polling interval in seconds for follow mode (default 0)
 - `--can-speed 125|250|500|auto`
 - `--can-id-format 11|29`
 - `--reconnect-delay 1.0` seconds between reconnect attempts
