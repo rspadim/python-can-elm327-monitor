@@ -22,6 +22,7 @@ Thumbs.db
 can.*.log
 *.pcap
 *.pcapng
+captures/
 
 # Test / tooling caches
 .pytest_cache/

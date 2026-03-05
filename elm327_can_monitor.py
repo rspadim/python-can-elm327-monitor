@@ -414,7 +414,7 @@ def build_view(
     log_path: str | None,
 ) -> Group:
     uptime = time.time() - started_at
-    status = "CONECTADO" if connected else "DESCONECTADO"
+    status = "CONNECTED" if connected else "DISCONNECTED"
     status_color = "green" if connected else "red"
 
     ids_sorted = sorted(messages.keys())
@@ -476,12 +476,12 @@ def build_view(
 
     header = Text.assemble(("ELM327 Wi-Fi CAN Monitor", "bold cyan"))
     parts = [
-        "q para sair",
+        "q to quit",
         f"Uptime: {uptime:6.1f}s",
         f"Status: {status}",
         f"Re: {reconnects}",
         f"Col: {cols_used}",
-        f"Tela: {term_width}x{term_height}",
+        f"Screen: {term_width}x{term_height}",
     ]
     if log_path:
         parts.append(f"Log: {Path(log_path).name}")
@@ -497,7 +497,7 @@ def build_view(
         else:
             header.append(candidate)
     if last_error:
-        line4 = Text(f"Ultimo erro: {last_error}", style="yellow")
+        line4 = Text(f"Last error: {last_error}", style="yellow")
         return Group(header, line4, grid)
     return Group(header, grid)
 
@@ -528,8 +528,8 @@ def resolve_protocol_code(can_speed: str, can_id_format: str) -> str:
 
 def run() -> int:
     if Live is None or Group is None or Columns is None or Text is None:
-        print("Dependencia ausente: rich")
-        print("Instale com: py -m pip install rich")
+        print("Missing dependency: rich")
+        print("Install with: py -m pip install rich")
         return 1
 
     parser = argparse.ArgumentParser(description="CAN monitor using ELM327 (wifi/serial) or python-can")
